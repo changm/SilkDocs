@@ -10,11 +10,11 @@ Our current architecture is to align three components to hardware vsync timers:
 
 The flow of our rendering engine is as follows:
 
-1. Hardware Vsync event occurs on an OS specific *Hardware Vsync Thread* on a per monitor basis. 
-2. For every Firefox window on the specific monitor, notify a **VsyncDispatcher**. The **VsyncDispatcher** is specific to one window. 
-3. The **VsyncDispatcher** will notify the **Compositor** that a vsync has occured. 
+1. Hardware Vsync event occurs on an OS specific *Hardware Vsync Thread* on a per monitor basis.
+2. For every Firefox window on the specific monitor, notify a **VsyncDispatcher**. The **VsyncDispatcher** is specific to one window.
+3. The **VsyncDispatcher** will notify the **Compositor** that a vsync has occured.
 4. The **VsyncDispatcher** will then notify the **RefreshDriver** that a vsync has occured.
-5. The **Compositor** composites on the *Compositor Thread*, then dispatches input events after a composite. 
+5. The **Compositor** composites on the *Compositor Thread*, then dispatches input events after a composite.
 6. The **RefreshDriver** paints on the *Main Thread*.
 
 The implementation broken into the following sections and will reference this figure. Note that **Objects** are bold fonts while *Threads* are italicized.
@@ -69,12 +69,10 @@ Silk with e10s
 Object lifetime
 
 #Threads
-\beginenumerate
-\item Compositor Thread
-\item Main Thread
-\item PBackground Thread
-\item Hardware Vsync Thread
-\endenumerate
+1. Compositor Thread
+2. Main Thread
+3. PBackground Thread
+4. Hardware Vsync Thread
 
 #Gaming
 
