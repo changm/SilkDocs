@@ -75,6 +75,15 @@ Each **CompositorParent** is associated with one widget and is created when a ne
 The **CompositorParent**, **VsyncDispatcher**, and **nsBaseWidget** all have the same lifetimes, which are created and destroyed together.
 
 ###Widget, Compositor, VsyncDispatcher Shutdown Procedure
+Shutdown Process
+
+When the [nsBaseWidget's destructor runs](http://dxr.mozilla.org/mozilla-central/source/widget/nsBaseWidget.cpp?from=nsBaseWidget.cpp#221) - It calls nsBaseWidget::DestroyCompositor on the *Gecko Main Thread*. The main issue is that we destroy the Compositor through the nsBaseWidget, so the widget will not be kept alive by the nsRefPtr on the CompositorVsyncObserver.
+
+During nsBaseWidget::DestroyCompositor, we first destroy the CompositorChild. This sends a sync IPC call to CompositorParent::RecvStop, which calls [CompositorParent::Destroy](http://dxr.mozilla.org/mozilla-central/source/gfx/layers/ipc/CompositorParent.cpp?from=CompositorParent.cpp#474). During this time, the *main thread* is blocked on the parent process. CompositorParent::Destroy runs on the *Compositor thread* and cleans up some resources, including setting the CompositorVsyncObserver to nullptr. CompositorParent::Destroy also explicitly keeps the CompositorParent alive and posts another task to run CompositorParent::DeferredDestroy on the Compositor loop so that all ipdl code can finish executing.
+
+Once CompositorParent::RecvStop finishes, the *main thread* in the parent process continues destroying nsBaseWidget. nsBaseWidget posts another task to [DeferedDestroyCompositor on the main thread](http://dxr.mozilla.org/mozilla-central/source/widget/nsBaseWidget.cpp#168). At the same time, the *Compositor thread* is executing tasks until CompositorParent::DeferredDestroy runs. Now we have a two tasks as both the nsBaseWidget:DeferredDestroyCompositor releases a reference to the Compositor on the *main thread* and the CompositorParent::DeferredDestroy releases a reference to the Compositor on the *compositor thread*. Finally, the CompositorParent itself is destroyed on the *main thread* once both deferred destroy's execute.
+
+With the CompositorVsyncObserver, any accesses to the widget after nsBaseWidget::~nsBaseWidget executes are invalid. While the sync call to CompositorParent::RecvStop executes, we set the CompositorVsyncObserver to null. If the CompositorVsyncObserver's vsync notification executes on the *hardware vsync thread*, it will post a task to the Compositor loop and reference an invalid widget. In addition, posting a task to the CompositorLoop would also be invalid as we could destroy the Compositor before the Vsync's tasks executes. Any accesses to the widget between the time the nsBaseWidget's destructor runs and the CompositorVsyncObserver's destructor runs on the *main thread* aren't safe yet a hardware vsync event could occur between these times. Thus, we explicitly shut down vsync events in the **VsyncDispatcher** during nsBaseWidget destruction.
 
 #Input Events
 One large goal of Silk is to align touch events with vsync events.
