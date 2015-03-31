@@ -33,6 +33,8 @@ Each platform will have to implement a specific **Display** object to hook and l
 As of this writing, both Firefox OS and OS X create their own hardware specific *Hardware Vsync Thread* that executes after a vsync has occured.
 OS X creates one *Hardware Vsync Thread* per **CVDisplayLinkRef**.
 We create one **CVDisplayLinkRef** per **Display**, thus two **Display** objects will have two independent *Hardware Vsync Threads*.
+On Windows, we have to create a new platform *thread* that waits for DwmFlush().
+Once the thread wakes up from DwmFlush(), the actual vsync timestamp is retrieved from DwmGetCompositionTimingInfo(), which is the timestamp that is actually passed into the compositor and refresh driver.
 
 When a vsync occurs on a **Display**, the *Hardware Vsync Thread* callback fetches all **CompositorVsyncDispatchers** associated with the **Display**.
 Each **CompositorVsyncDispatcher** is notified that a vsync has occured with the vsync's timestamp.
@@ -76,41 +78,44 @@ Every **CompositorParent** is associated and tied to one **CompositorVsyncDispat
 Each **CompositorParent** is associated with one widget and is created when a new platform window or **nsBaseWidget** is created.
 The **CompositorParent**, **CompositorVsyncDispatcher**, and **nsBaseWidget** all have the same lifetimes, which are created and destroyed together.
 
-###Widget, Compositor, CompositorVsyncDispatcher Shutdown Procedure
-Shutdown Process
-
-When the [nsBaseWidget's destructor runs](http://dxr.mozilla.org/mozilla-central/source/widget/nsBaseWidget.cpp?from=nsBaseWidget.cpp#221) - It calls nsBaseWidget::DestroyCompositor on the *Gecko Main Thread*. The main issue is that we destroy the Compositor through the nsBaseWidget, so the widget will not be kept alive by the nsRefPtr on the CompositorVsyncObserver.
-
-During nsBaseWidget::DestroyCompositor, we first destroy the CompositorChild. This sends a sync IPC call to CompositorParent::RecvStop, which calls [CompositorParent::Destroy](http://dxr.mozilla.org/mozilla-central/source/gfx/layers/ipc/CompositorParent.cpp?from=CompositorParent.cpp#474). During this time, the *main thread* is blocked on the parent process. CompositorParent::Destroy runs on the *Compositor thread* and cleans up some resources, including setting the CompositorVsyncObserver to nullptr. CompositorParent::Destroy also explicitly keeps the CompositorParent alive and posts another task to run CompositorParent::DeferredDestroy on the Compositor loop so that all ipdl code can finish executing.
-
-Once CompositorParent::RecvStop finishes, the *main thread* in the parent process continues destroying nsBaseWidget. nsBaseWidget posts another task to [DeferedDestroyCompositor on the main thread](http://dxr.mozilla.org/mozilla-central/source/widget/nsBaseWidget.cpp#168). At the same time, the *Compositor thread* is executing tasks until CompositorParent::DeferredDestroy runs. Now we have a two tasks as both the nsBaseWidget:DeferredDestroyCompositor releases a reference to the Compositor on the *main thread* and the CompositorParent::DeferredDestroy releases a reference to the Compositor on the *compositor thread*. Finally, the CompositorParent itself is destroyed on the *main thread* once both deferred destroy's execute.
-
-With the CompositorVsyncObserver, any accesses to the widget after nsBaseWidget::~nsBaseWidget executes are invalid. While the sync call to CompositorParent::RecvStop executes, we set the CompositorVsyncObserver to null. If the CompositorVsyncObserver's vsync notification executes on the *hardware vsync thread*, it will post a task to the Compositor loop and reference an invalid widget. In addition, posting a task to the CompositorLoop would also be invalid as we could destroy the Compositor before the Vsync's tasks executes. Any accesses to the widget between the time the nsBaseWidget's destructor runs and the CompositorVsyncObserver's destructor runs on the *main thread* aren't safe yet a hardware vsync event could occur between these times. Thus, we explicitly shut down vsync events in the **CompositorVsyncDispatcher** during nsBaseWidget destruction.
+#GeckoTouchDispatcher
+The **GeckoTouchDispatcher** is a singleton that resamples touch events to smooth out jank while tracking a user's finger.
+Because input and composite are linked together, the **CompositorVsyncDispatcher** has a reference to the **GeckoTouchDispatcher** and vice versa.
 
 #Input Events
 One large goal of Silk is to align touch events with vsync events.
 On Firefox OS, touchscreens often have different touch scan rates than the display refreshes.
 A Flame device has a touch refresh rate of 75 HZ, while a Nexus 4 has a touch refresh rate of 100 HZ, while the device's display refresh rate is 60HZ.
 When a vsync event occurs, we resample touch events then dispatch the resampled touch event to APZ.
-Touch events on Firefox OS occur on a *Touch Input Thread* whereas they are processed by APZ on the *Gecko Main Thread*.
-Until APZ can process touch events on another *APZ Input Thread*, we will be bottlenecked for truly smooth scrolling.
+Touch events on Firefox OS occur on a *Touch Input Thread* whereas they are processed by APZ on the *APZ Controller Thread*.
 We use [Google Android's touch resampling](http://www.masonchang.com/blog/2014/8/25/androids-touch-resampling-algorithm) algorithm to resample touch events.
 
 Currently, we have a strict ordering between Composites and touch events.
 When a touch event occurs on the *Touch Input Thread*, we store the touch event in a queue.
 When a vsync event occurs, the **CompositorVsyncDispatcher** notifies the **Compositor** of a vsync event.
-Once the **Compositor** finishes compositing, it then notifies the **GeckoTouchDispatcher**, which processes the touch event.
+The **GeckoTouchDispatcher** processes the touch event first, then the **Compositor** finishes compositing.
 We require this strict ordering because if a vsync notification is dispatched to both the **Compositor** and **GeckoTouchDispatcher** at the same time, a race condition occurs between processing the touch event and therefore position versus compositing.
 In practice, this creates very janky scrolling.
-
-Once touch events can be processed off the *Gecko Main Thread*, we can inverse this ordering so remove one frame of latency.
-Touch events can be processed on the *APZ Input Thread*, which then notifies the **Compositor** to composite with the latest touch input data.
+Touch events are processed on the *APZ Controller Thread*, which is the same as the *Compositor Thread* on b2g, which then notifies the **Compositor** to composite with the latest touch input data.
 As of this writing, we have not analyzed input events on desktop platforms.
 
 One slight quirk is that input events can start a composite, for example during a scroll and after the **Compositor** is no longer listening to vsync events.
-In these cases, we have to dispatch vsync events to the **GeckoTouchDispatcher** so that the touch events are processed.
+In these cases, we notify the **Compositor** to observe vsync so that it dispatches touch events.
 If touch events were not dispatched, and since the **Compositor** is not listening to vsync events, the touch events would never be dispatched.
-This corner case is handled in the **CompositorVsyncDispatcher**.
+The **GeckoTouchDispatcher** handles this case by always forcing the **Compositor** to listen to vsync events while touch events are occurring.
+
+###Widget, Compositor, CompositorVsyncDispatcher, GeckoTouchDispatcher Shutdown Procedure
+Shutdown Process
+
+When the [nsBaseWidget's destructor runs](http://dxr.mozilla.org/mozilla-central/source/widget/nsBaseWidget.cpp?from=nsBaseWidget.cpp#221) - It calls nsBaseWidget::DestroyCompositor on the *Gecko Main Thread*. The main issue is that we destroy the Compositor through the nsBaseWidget, so the widget will not be kept alive by the nsRefPtr on the CompositorVsyncObserver.
+
+During nsBaseWidget::DestroyCompositor, we first destroy the CompositorChild. This sends a sync IPC call to CompositorParent::RecvStop, which calls [CompositorParent::Destroy](http://dxr.mozilla.org/mozilla-central/source/gfx/layers/ipc/CompositorParent.cpp?from=CompositorParent.cpp#474). During this time, the *main thread* is blocked on the parent process. CompositorParent::Destroy runs on the *Compositor thread* and cleans up some resources, including setting the **CompositorVsyncObserver** to nullptr. CompositorParent::Destroy also explicitly keeps the CompositorParent alive and posts another task to run CompositorParent::DeferredDestroy on the Compositor loop so that all ipdl code can finish executing. The **CompositorVsyncObserver** removes itself as a reference to the **GeckoTouchDispatcher**.
+
+Once CompositorParent::RecvStop finishes, the *main thread* in the parent process continues destroying nsBaseWidget. nsBaseWidget posts another task to [DeferedDestroyCompositor on the main thread](http://dxr.mozilla.org/mozilla-central/source/widget/nsBaseWidget.cpp#168). At the same time, the *Compositor thread* is executing tasks until CompositorParent::DeferredDestroy runs. Now we have a two tasks as both the nsBaseWidget:DeferredDestroyCompositor releases a reference to the Compositor on the *main thread* and the CompositorParent::DeferredDestroy releases a reference to the Compositor on the *compositor thread*. Finally, the CompositorParent itself is destroyed on the *main thread* once both deferred destroy's execute.
+
+With the **CompositorVsyncObserver**, any accesses to the widget after nsBaseWidget::~nsBaseWidget executes are invalid. While the sync call to CompositorParent::RecvStop executes, we set the CompositorVsyncObserver to null. If the CompositorVsyncObserver's vsync notification executes on the *hardware vsync thread*, it will post a task to the Compositor loop and reference an invalid widget. In addition, posting a task to the CompositorLoop would also be invalid as we could destroy the Compositor before the Vsync's tasks executes. Any accesses to the widget between the time the nsBaseWidget's destructor runs and the CompositorVsyncObserver's destructor runs on the *main thread* aren't safe yet a hardware vsync event could occur between these times. Thus, we explicitly shut down vsync events in the **CompositorVsyncDispatcher** during nsBaseWidget destruction.
+
+The **CompositorVsyncDispatcher** may be destroyed on either the *main thread* or *Compositor Thread*, since both the nsBaseWidget and Compositor race to destroy on different threads. Whichever thread finishes destroying last will hold the last reference to the **CompositorVsyncDispatcher**, which destroys the object.
 
 #Refresh Driver
 The Refresh Driver is ticked from a [single active timer](http://dxr.mozilla.org/mozilla-central/source/layout/base/nsRefreshDriver.cpp?from=nsRefreshDriver.cpp#11). The assumption is that there are multiple **RefreshDrivers** connected to a single **RefreshTimer**. There are multiple **RefreshTimers**, an active and an inactive **RefreshTimer**. Each Tab has its own **RefreshDriver**, which connects to one of the global **RefreshTimers**. The **RefreshTimers** execute on the *Main Thread* and tick their connected **RefreshDrivers**. We do not want to break this model of multiple **RefreshDrivers** per a limited set of global **RefreshTimers**. Each **RefreshDriver** switches between the active and inactive **RefreshTimer**, which already occurs before Silk.
@@ -149,14 +154,7 @@ Object lifetime
 #Threads
 All **VsyncObservers** are notified on the *Hardware Vsync Thread*. It is the responsibility of the **VsyncObservers** to post tasks to their respective correct thread. For example, the **CompositorVsyncObserver** will be notified on the *Hardware Vsync Thread*, and post a task to the *Compositor Thread* to do the actual composition.
 
-1. Compositor Thread
-2. Main Thread
-3. PBackground Thread
-4. Hardware Vsync Thread
-5. APZ Input Thread
-
-#Gaming
-
-#Performance
-Vsync Timers
-
+1. Compositor Thread - Nothing changes
+2. Main Thread - PVsyncChild receives IPC messages on the main thread.
+3. PBackground Thread - Creates a connection from the PBackground thread on the parent process to the main thread in the content process.
+4. Hardware Vsync Thread - Every platform is different, but we always have the concept of a hardware vsync thread. Sometimes this is actually created by the host OS. On Windows, we have to create a separate platform thread that blocks on DwmFlush().
