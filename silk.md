@@ -15,30 +15,30 @@ The flow of our rendering engine is as follows:
 3. The **CompositorVsyncDispatcher** will notify the **Compositor** that a vsync has occured.
 4. The **RefreshTimerVsyncDispatcher** will then notify the Chrome **RefreshTimer** that a vsync has occured.
 5. The **RefreshTimerVsyncDispatcher** will send IPC messages to all content processes to tick their respective active **RefreshTimer**.
-6. The **Compositor** composites on the *Compositor Thread*, then dispatches input events after a composite.
+6. The **Compositor** dispatches input events on the *Compositor Thread*, then composites.
 7. The **RefreshDriver** paints on the *Main Thread*.
 
-The implementation broken into the following sections and will reference this figure. Note that **Objects** are bold fonts while *Threads* are italicized.
+The implementation is broken into the following sections and will reference this figure. Note that **Objects** are bold fonts while *Threads* are italicized.
 
 <img src="architecture.png" width="900px" height="630px" />
 
 #Hardware Vsync
 Hardware vsync events from (1), occur on a specific **Display** Object.
-The **Display** object manages and is responsible for enabling / disabling vsync on a per connected display basis.
+The **Display** object is responsible for enabling / disabling vsync on a per connected display basis.
 For example, if two monitors are connected, two **Display** objects will be created, each listening to vsync events for their respective displays.
-We require one **Display** object per monitor as each monitor may have different vsync rates or timers.
+We require one **Display** object per monitor as each monitor may have different vsync rates.
 As a fallback solution, we have one global **Display** object that can synchronize across all connected displays.
 The global **Display** is useful if a window is positioned halfway between the two monitors.
 Each platform will have to implement a specific **Display** object to hook and listen to vsync events.
 As of this writing, both Firefox OS and OS X create their own hardware specific *Hardware Vsync Thread* that executes after a vsync has occured.
 OS X creates one *Hardware Vsync Thread* per **CVDisplayLinkRef**.
-We create one **CVDisplayLinkRef** per **Display**, thus two **Display** objects will have two independent *Hardware Vsync Threads*.
-On Windows, we have to create a new platform *thread* that waits for DwmFlush().
+We do not currently support multiple displays, so we use one global **CVDisplayLinkRef** that works across all active displays.
+On Windows, we have to create a new platform *thread* that waits for DwmFlush(), which works across all active displays.
 Once the thread wakes up from DwmFlush(), the actual vsync timestamp is retrieved from DwmGetCompositionTimingInfo(), which is the timestamp that is actually passed into the compositor and refresh driver.
 
 When a vsync occurs on a **Display**, the *Hardware Vsync Thread* callback fetches all **CompositorVsyncDispatchers** associated with the **Display**.
 Each **CompositorVsyncDispatcher** is notified that a vsync has occured with the vsync's timestamp.
-It is the responsibility of the **CompositorVsyncDispatcher** to notify other components such as the **Compositor**.
+It is the responsibility of the **CompositorVsyncDispatcher** to notify the **Compositor** that is awaiting vsync notifications.
 The **Display** will then notify the associated **RefreshTimerVsyncDispatcher**, which should notify all active **RefreshDrivers** to tick.
 
 All **Display** objects are encapsulated in a **Vsync Source** object.
@@ -51,13 +51,14 @@ On OS X, this is through **CVDisplayLinkRef**.
 On Windows, it should be through **DwmGetCompositionTimingInfo**.
 
 ###Multiple Displays
-The **VsyncSource** should have an API to switch a **CompositorVsyncDispatcher** from one **Display** to another **Display**.
+The **VsyncSource** has an API to switch a **CompositorVsyncDispatcher** from one **Display** to another **Display**.
 For example, when one window either goes into full screen mode or moves from one connected monitor to another.
 When one window moves to another monitor, we expect a platform specific notification to occur.
 The detection of when a window enters full screen mode or moves is not covered by Silk itself, but the framework is built to support this use case.
 The expected flow is that the OS notification occurs on **nsIWidget**, which retrieves the associated **CompositorVsyncDispatcher**.
 The **CompositorVsyncDispatcher** then notifies the **VsyncSource** to switch the correct **Display** the **CompositorVsyncDispatcher** is connected to.
 Because the notification works through the **nsIWidget**, the actual switching of the **CompositorVsyncDispatcher** to the correct **Display** should occur on the *Main Thread*.
+The current implementation of Silk does not handle this case and needs to be built out.
 
 ###CompositorVsyncDispatcher
 The **CompositorVsyncDispatcher** executes on the *Hardware Vsync Thread*.
@@ -78,9 +79,14 @@ Every **CompositorParent** is associated and tied to one **CompositorVsyncDispat
 Each **CompositorParent** is associated with one widget and is created when a new platform window or **nsBaseWidget** is created.
 The **CompositorParent**, **CompositorVsyncDispatcher**, and **nsBaseWidget** all have the same lifetimes, which are created and destroyed together.
 
+#CompositorVsyncObserver
+The **CompositorVsyncObserver** handles the vsync notifications and interactions with the **CompositorVsyncDispatcher**.
+When the **Compositor** requires a scheduled composite, it notifies the **CompositorVsyncObserver** that it needs to listen to vsync.
+The **CompositorVsyncObserver** then observes / unobserves vsync as needed from the **CompositorVsyncDispatcher** to enable composites.
+
 #GeckoTouchDispatcher
 The **GeckoTouchDispatcher** is a singleton that resamples touch events to smooth out jank while tracking a user's finger.
-Because input and composite are linked together, the **CompositorVsyncDispatcher** has a reference to the **GeckoTouchDispatcher** and vice versa.
+Because input and composite are linked together, the **CompositorVsyncObserver** has a reference to the **GeckoTouchDispatcher** and vice versa.
 
 #Input Events
 One large goal of Silk is to align touch events with vsync events.
