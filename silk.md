@@ -48,7 +48,7 @@ There is only one **VsyncSource** object throughout the entire lifetime of Firef
 Each platform is expected to implement their own **VsyncSource** to manage vsync events.
 On Firefox OS, this is through the **HwcComposer2D**.
 On OS X, this is through **CVDisplayLinkRef**.
-On Windows, it should be through **WaitForVBlank**.
+On Windows, it should be through **DwmGetCompositionTimingInfo**.
 
 ###Multiple Displays
 The **VsyncSource** should have an API to switch a **CompositorVsyncDispatcher** from one **Display** to another **Display**.
