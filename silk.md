@@ -50,45 +50,46 @@ On Firefox OS, this is through the **HwcComposer2D**.
 On OS X, this is through **CVDisplayLinkRef**.
 On Windows, it should be through **DwmGetCompositionTimingInfo**.
 
+#Compositor
+When the **CompositorVsyncDispatcher** is notified of the vsync event, the **CompositorVsyncObserver** associated with the **CompositorVsyncDispatcher** begins execution.
+Since the **CompositorVsyncDispatcher** executes on the *Hardware Vsync Thread* and the **Compositor** composites on the *CompositorThread*, the **CompositorVsyncObserver** posts a task to the *CompositorThread*.
+The **CompositorParent** then composites.
+Thus the **CompositorVsyncDispatcher** notifies the **CompositorVsyncObserver**, which then schedules the task on the appropriate thread.
+The model where the **CompositorVsyncDispatcher** notifies components on the *Hardware Vsync Thread*, and the component schedules the task on the appropriarate thread is used everywhere.
+
+The **CompositorVsyncObserver** listens to vsync events as needed and stops listening to vsync when composites are no longer scheduled or required.
+Every **CompositorParent** is associated and tied to one **CompositorVsyncObserver**, which is associated with the **CompositorVsyncDispatcher**.
+Each **CompositorParent** is associated with one widget and is created when a new platform window or **nsBaseWidget** is created.
+The **CompositorParent**, **CompositorVsyncDispatcher**, **CompositorVsyncObserver**, and **nsBaseWidget** all have the same lifetimes, which are created and destroyed together.
+
+###CompositorVsyncDispatcher
+The **CompositorVsyncDispatcher** executes on the *Hardware Vsync Thread*.
+It contains references to the **nsBaseWidget** it is associated with and has a lifetime equal to the **nsBaseWidget**.
+The **CompositorVsyncDispatcher** is responsible for notifying the **CompositorParent** that a vsync event has occured.
+There can be multiple **CompositorVsyncDispatchers** per **Display**, one **CompositorVsyncDispatcher** per window.
+The only responsibility of the **CompositorVsyncDispatcher** is to notify components when a vsync event has occured, and to stop listening to vsync when no components require vsync events.
+We require one **CompositorVsyncDispatcher** per window so that we can handle multiple **Displays**.
+
 ###Multiple Displays
 The **VsyncSource** has an API to switch a **CompositorVsyncDispatcher** from one **Display** to another **Display**.
 For example, when one window either goes into full screen mode or moves from one connected monitor to another.
 When one window moves to another monitor, we expect a platform specific notification to occur.
 The detection of when a window enters full screen mode or moves is not covered by Silk itself, but the framework is built to support this use case.
 The expected flow is that the OS notification occurs on **nsIWidget**, which retrieves the associated **CompositorVsyncDispatcher**.
-The **CompositorVsyncDispatcher** then notifies the **VsyncSource** to switch the correct **Display** the **CompositorVsyncDispatcher** is connected to.
+The **CompositorVsyncDispatcher** then notifies the **VsyncSource** to switch to the correct **Display** the **CompositorVsyncDispatcher** is connected to.
 Because the notification works through the **nsIWidget**, the actual switching of the **CompositorVsyncDispatcher** to the correct **Display** should occur on the *Main Thread*.
 The current implementation of Silk does not handle this case and needs to be built out.
 
-###CompositorVsyncDispatcher
-The **CompositorVsyncDispatcher** executes on the *Hardware Vsync Thread*.
-It contains references to the **nsBaseWidget** it is associated with and has a lifetime equal to the **nsBaseWidget**.
-The **CompositorVsyncDispatcher** is responsible for notifying the various components that a vsync event has occured.
-There can be multiple **CompositorVsyncDispatchers** per **Display**, one **CompositorVsyncDispatcher** per window.
-The only responsibility of the **CompositorVsyncDispatcher** is to notify components when a vsync event has occured, and to stop listening to vsync when no components require vsync events.
-We require one **CompositorVsyncDispatcher** per window so that we can handle multiple **Displays**.
-
-#Compositor
-When the **CompositorVsyncDispatcher** is notified of the vsync event, the **Compositor** associated with the **CompositorVsyncDispatcher** begins execution.
-Since the **CompositorVsyncDispatcher** executes on the *Hardware Vsync Thread* and the **Compositor** composites on the *CompositorThread*, the **Compositor** posts a task to the *CompositorThread*.
-Thus the **CompositorVsyncDispatcher** notifies the **Compositor**, which then schedules the task on the appropriate thread.
-The model where the **CompositorVsyncDispatcher** notifies components on the *Hardware Vsync Thread*, and the component schedules the task on the appropriarate thread is used everywhere.
-
-The **Compositor** listens to vsync events as needed and stops listening to vsync when composites are no longer scheduled or required.
-Every **CompositorParent** is associated and tied to one **CompositorVsyncDispatcher**.
-Each **CompositorParent** is associated with one widget and is created when a new platform window or **nsBaseWidget** is created.
-The **CompositorParent**, **CompositorVsyncDispatcher**, and **nsBaseWidget** all have the same lifetimes, which are created and destroyed together.
-
-#CompositorVsyncObserver
+###CompositorVsyncObserver
 The **CompositorVsyncObserver** handles the vsync notifications and interactions with the **CompositorVsyncDispatcher**.
 When the **Compositor** requires a scheduled composite, it notifies the **CompositorVsyncObserver** that it needs to listen to vsync.
 The **CompositorVsyncObserver** then observes / unobserves vsync as needed from the **CompositorVsyncDispatcher** to enable composites.
 
-#GeckoTouchDispatcher
+###GeckoTouchDispatcher
 The **GeckoTouchDispatcher** is a singleton that resamples touch events to smooth out jank while tracking a user's finger.
 Because input and composite are linked together, the **CompositorVsyncObserver** has a reference to the **GeckoTouchDispatcher** and vice versa.
 
-#Input Events
+###Input Events
 One large goal of Silk is to align touch events with vsync events.
 On Firefox OS, touchscreens often have different touch scan rates than the display refreshes.
 A Flame device has a touch refresh rate of 75 HZ, while a Nexus 4 has a touch refresh rate of 100 HZ, while the device's display refresh rate is 60HZ.
@@ -112,18 +113,18 @@ The **GeckoTouchDispatcher** handles this case by always forcing the **Composito
 ###Widget, Compositor, CompositorVsyncDispatcher, GeckoTouchDispatcher Shutdown Procedure
 Shutdown Process
 
-When the [nsBaseWidget's destructor runs](http://dxr.mozilla.org/mozilla-central/source/widget/nsBaseWidget.cpp?from=nsBaseWidget.cpp#221) - It calls nsBaseWidget::DestroyCompositor on the *Gecko Main Thread*. The main issue is that we destroy the Compositor through the nsBaseWidget, so the widget will not be kept alive by the nsRefPtr on the CompositorVsyncObserver.
+When the [nsBaseWidget's destructor runs](http://dxr.mozilla.org/mozilla-central/source/widget/nsBaseWidget.cpp?from=nsBaseWidget.cpp#221) - It calls nsBaseWidget::DestroyCompositor on the *Gecko Main Thread*. The main issue is that we destroy the Compositor through the nsBaseWidget, and the widget will not be kept alive by the nsRefPtr on the CompositorVsyncObserver.
 
 During nsBaseWidget::DestroyCompositor, we first destroy the CompositorChild. This sends a sync IPC call to CompositorParent::RecvStop, which calls [CompositorParent::Destroy](http://dxr.mozilla.org/mozilla-central/source/gfx/layers/ipc/CompositorParent.cpp?from=CompositorParent.cpp#474). During this time, the *main thread* is blocked on the parent process. CompositorParent::Destroy runs on the *Compositor thread* and cleans up some resources, including setting the **CompositorVsyncObserver** to nullptr. CompositorParent::Destroy also explicitly keeps the CompositorParent alive and posts another task to run CompositorParent::DeferredDestroy on the Compositor loop so that all ipdl code can finish executing. The **CompositorVsyncObserver** removes itself as a reference to the **GeckoTouchDispatcher**.
 
-Once CompositorParent::RecvStop finishes, the *main thread* in the parent process continues destroying nsBaseWidget. nsBaseWidget posts another task to [DeferedDestroyCompositor on the main thread](http://dxr.mozilla.org/mozilla-central/source/widget/nsBaseWidget.cpp#168). At the same time, the *Compositor thread* is executing tasks until CompositorParent::DeferredDestroy runs. Now we have a two tasks as both the nsBaseWidget:DeferredDestroyCompositor releases a reference to the Compositor on the *main thread* and the CompositorParent::DeferredDestroy releases a reference to the Compositor on the *compositor thread*. Finally, the CompositorParent itself is destroyed on the *main thread* once both deferred destroy's execute.
+Once CompositorParent::RecvStop finishes, the *main thread* in the parent process continues destroying nsBaseWidget. nsBaseWidget posts another task to [DeferedDestroyCompositor on the main thread](http://dxr.mozilla.org/mozilla-central/source/widget/nsBaseWidget.cpp#168). At the same time, the *Compositor thread* is executing tasks until CompositorParent::DeferredDestroy runs. Now we have a two tasks as both the nsBaseWidget::DeferredDestroyCompositor releases a reference to the Compositor on the *main thread* and the CompositorParent::DeferredDestroy releases a reference to the Compositor on the *compositor thread*. Finally, the CompositorParent itself is destroyed on the *main thread* once both deferred destroy's execute.
 
-With the **CompositorVsyncObserver**, any accesses to the widget after nsBaseWidget::~nsBaseWidget executes are invalid. While the sync call to CompositorParent::RecvStop executes, we set the CompositorVsyncObserver to null. If the CompositorVsyncObserver's vsync notification executes on the *hardware vsync thread*, it will post a task to the Compositor loop and reference an invalid widget. In addition, posting a task to the CompositorLoop would also be invalid as we could destroy the Compositor before the Vsync's tasks executes. Any accesses to the widget between the time the nsBaseWidget's destructor runs and the CompositorVsyncObserver's destructor runs on the *main thread* aren't safe yet a hardware vsync event could occur between these times. Thus, we explicitly shut down vsync events in the **CompositorVsyncDispatcher** during nsBaseWidget destruction.
+With the **CompositorVsyncObserver**, any accesses to the widget after nsBaseWidget::~nsBaseWidget executes are invalid. While the sync call to CompositorParent::RecvStop executes, we set the CompositorVsyncObserver to null. Since the CompositorVsyncObserver's vsync notification executes on the *hardware vsync thread*, it will post a task to the Compositor loop and reference an invalid widget. Posting a task to the CompositorLoop is invalid as we could destroy the Compositor before the Vsync's tasks executes. Any accesses to the widget between the time the nsBaseWidget's destructor runs and the CompositorVsyncObserver's destructor runs on the *main thread* aren't safe yet a hardware vsync event could occur between these times. Thus, we explicitly shut down vsync events in the **CompositorVsyncDispatcher** during nsBaseWidget destruction.
 
-The **CompositorVsyncDispatcher** may be destroyed on either the *main thread* or *Compositor Thread*, since both the nsBaseWidget and Compositor race to destroy on different threads. Whichever thread finishes destroying last will hold the last reference to the **CompositorVsyncDispatcher**, which destroys the object.
+The **CompositorVsyncDispatcher** may be destroyed on either the *main thread* or *Compositor Thread*, since both the nsBaseWidget and CompositorVsyncObserver race to destroy on different threads. Whichever thread finishes destroying last will hold the last reference to the **CompositorVsyncDispatcher**, which destroys the object.
 
 #Refresh Driver
-The Refresh Driver is ticked from a [single active timer](http://dxr.mozilla.org/mozilla-central/source/layout/base/nsRefreshDriver.cpp?from=nsRefreshDriver.cpp#11). The assumption is that there are multiple **RefreshDrivers** connected to a single **RefreshTimer**. There are multiple **RefreshTimers**, an active and an inactive **RefreshTimer**. Each Tab has its own **RefreshDriver**, which connects to one of the global **RefreshTimers**. The **RefreshTimers** execute on the *Main Thread* and tick their connected **RefreshDrivers**. We do not want to break this model of multiple **RefreshDrivers** per a limited set of global **RefreshTimers**. Each **RefreshDriver** switches between the active and inactive **RefreshTimer**, which already occurs before Silk.
+The Refresh Driver is ticked from a [single active timer](http://dxr.mozilla.org/mozilla-central/source/layout/base/nsRefreshDriver.cpp?from=nsRefreshDriver.cpp#11). The assumption is that there are multiple **RefreshDrivers** connected to a single **RefreshTimer**. There are multiple **RefreshTimers**: an active and an inactive **RefreshTimer**. Each Tab has its own **RefreshDriver**, which connects to one of the global **RefreshTimers**. The **RefreshTimers** execute on the *Main Thread* and tick their connected **RefreshDrivers**. We do not want to break this model of multiple **RefreshDrivers** per a limited set of global **RefreshTimers**. Each **RefreshDriver** switches between the active and inactive **RefreshTimer**, which already occurs before Silk.
 
 Instead, we create a new **RefreshTimer**, the **VsyncRefreshTimer** which ticks based on vsync messages. We replace the current active timer with a **VsyncRefreshTimer**. All tabs will then tick based on this new active timer. Since the **RefreshTimer** has a lifetime of the process, we only need to create a single **RefreshTimerVsyncDispatcher** per **Display** when Firefox starts. Even if we do not have any content processes, the Chrome process will still need a **VsyncRefreshTimer**, thus we can associate the **RefreshTimerVsyncDispatcher** with each **Display**.
 
@@ -144,7 +145,7 @@ Thus the overall flow during normal execution is:
 5. VsyncParent posts a task to the PBackground thread to send a vsync IPC message to VsyncChild.
 6. VsyncChild receive a vsync notification on the content process on the main thread and ticks their respective RefreshDrivers.
 
-#Compressing Vsync Messages
+###Compressing Vsync Messages
 Vsync messages occur quite often and the *main thread* can be busy for long periods of time due to JavaScript.
 Consistently sending vsync messages to the refresh driver timer can flood the *main thread* with refresh driver ticks, causing even more delays.
 To avoid this problem, we compress vsync messages on both the parent and child processes.
@@ -155,7 +156,18 @@ After the refresh driver has ticked, one single vsync message is queued for anot
 On the content process, the IPDL **compress** keyword automatically compresses IPC messages.
 
 ### Multiple Monitors
-In order to have multiple monitor support for the **RefreshDrivers**, we will have multiple active **RefreshTimers**. Each **RefreshTimer** will be associated with a specific **Display** via an id and tick when it's respective **Display** vsync occurs. We will have **N RefreshTimers**, where N is the number of connected displays. Each **RefreshTimer** will still have multiple **RefreshDrivers**. When a tab or window change monitors, the **nsIWidget** will receive a display changed notification. Based on which display the window is on, the window will switch to the correct **RefreshTimerVsyncDispatcher** and **CompositorVsyncDispatcher** on the parent process. Each **TabParent** should also send a notification to their child. Each **TabChild**, given the display ID, switches to the correct **RefreshTimer** associated with the display ID. When each display vsync occurs, it will send one IPC message to notify vsync. The vsync message will contain a display ID, to tick the appropriate **RefreshTimer** on the content process. There will still be only one **VsyncParent/VsyncChild** pair, just each vsync notification will include a display ID, which maps to the correct **RefreshTimer**.
+In order to have multiple monitor support for the **RefreshDrivers**, we have multiple active **RefreshTimers**.
+Each **RefreshTimer** is associated with a specific **Display** via an id and tick when it's respective **Display** vsync occurs.
+We have **N RefreshTimers**, where N is the number of connected displays.
+Each **RefreshTimer** still has multiple **RefreshDrivers**.
+
+When a tab or window change monitors, the **nsIWidget** receives a display changed notification.
+Based on which display the window is on, the window switches to the correct **RefreshTimerVsyncDispatcher** and **CompositorVsyncDispatcher** on the parent process based on the display id.
+Each **TabParent** should also sendsa notification to their child.
+Each **TabChild**, given the display ID, switches to the correct **RefreshTimer** associated with the display ID.
+When each display vsync occurs, it sends one IPC message to notify vsync.
+The vsync message contains a display ID, to tick the appropriate **RefreshTimer** on the content process.
+There is still only one **VsyncParent/VsyncChild** pair, just each vsync notification will include a display ID, which maps to the correct **RefreshTimer**.
 
 #Object Lifetime
 1. CompositorVsyncDispatcher - Lives as long as the nsBaseWidget associated with the VsyncDispatcher
