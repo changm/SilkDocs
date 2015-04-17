@@ -118,16 +118,16 @@ During this time, the *main thread* is blocked on the parent process.
 CompositorParent::Destroy runs on the *Compositor thread* and cleans up some resources, including setting the **CompositorVsyncObserver** to nullptr.
 CompositorParent::Destroy also explicitly keeps the CompositorParent alive and posts another task to run CompositorParent::DeferredDestroy on the Compositor loop so that all ipdl code can finish executing.
 The **CompositorVsyncObserver** also unobserves from vsync and cancels any pending composite tasks.
-Once CompositorParent::RecvStop finishes, the *main thread* in the parent process continues destroying nsBaseWidget.
+Once CompositorParent::RecvStop finishes, the *main thread* in the parent process continues shutting down the nsBaseWidget.
 
 At the same time, the *Compositor thread* is executing tasks until CompositorParent::DeferredDestroy runs, which flushes the compositor message loop.
 Now we have a two tasks as both the nsBaseWidget releases a reference to the Compositor on the *main thread* during destruction and the CompositorParent::DeferredDestroy releases a reference to the Compositor on the *compositor thread*.
-Finally, the CompositorParent itself is destroyed on the *main thread* once both deferred destroy's execute.
+Finally, the CompositorParent itself is destroyed on the *main thread* once both references are gone.
 
 With the **CompositorVsyncObserver**, any accesses to the widget after nsBaseWidget::DestroyCompositor executes are invalid.
-While the sync call to CompositorParent::RecvStop executes, we set the CompositorVsyncObserver to null.
-Since the CompositorVsyncObserver's vsync notification executes on the *hardware vsync thread*, it will post a task to the Compositor loop and may execute after CompositorParent::DeferredDestroy.
-Posting a task to the CompositorLoop is invalid as we could destroy the Compositor before the Vsync's tasks executes.
+When the sync call to CompositorParent::RecvStop executes, we set the CompositorVsyncObserver to null.
+Since the **CompositorVsyncObserver**'s vsync notification executes on the *hardware vsync thread*, it will post a task to the Compositor loop and may execute after CompositorParent::DeferredDestroy.
+Posting a task to the CompositorLoop is invalid as we could destroy the Compositor before the vsync's tasks executes.
 Any accesses to the compositor between the time the nsBaseWidget::DestroyCompositor runs and the CompositorVsyncObserver's destructor runs aren't safe yet a hardware vsync event could occur between these times.
 Thus, we explicitly shut down vsync events in the **CompositorVsyncDispatcher** and **CompositorVsyncObserver** during nsBaseWidget::Shutdown.
 
